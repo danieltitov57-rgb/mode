@@ -1,0 +1,26 @@
+modLoader="javafml"
+loaderVersion="[36,)"
+license="MIT"
+
+[[mods]]
+modId="edgerunner"
+version="${file.jarVersion}"
+displayName="Edge Runner"
+description='''
+Parkour in the style of Mirror's Edge: momentum, wall run, wall jump, slide and vault.
+Client-side mod: works in singleplayer and on servers without the mod.
+'''
+
+[[dependencies.edgerunner]]
+    modId="forge"
+    mandatory=true
+    versionRange="[36,)"
+    ordering="NONE"
+    side="BOTH"
+
+[[dependencies.edgerunner]]
+    modId="minecraft"
+    mandatory=true
+    versionRange="[1.16.5]"
+    ordering="NONE"
+    side="BOTH"
