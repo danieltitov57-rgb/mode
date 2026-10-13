@@ -1,0 +1,11 @@
+{
+  "providers": [
+    {
+      "type": "ttf",
+      "file": "edgerunner:ui.ttf",
+      "shift": [0.0, 0.0],
+      "size": 11.0,
+      "oversample": 3.0
+    }
+  ]
+}

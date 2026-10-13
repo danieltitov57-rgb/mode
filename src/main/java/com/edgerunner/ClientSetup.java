@@ -11,5 +11,6 @@ public class ClientSetup {
     @SubscribeEvent
     public static void onClientSetup(FMLClientSetupEvent event) {
         ClientRegistry.registerKeyBinding(ParkourClient.TOGGLE_KEY);
+        ClientRegistry.registerKeyBinding(ParkourClient.HELP_KEY);
     }
 }
