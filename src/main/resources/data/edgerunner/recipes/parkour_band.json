@@ -1,0 +1,10 @@
+{
+  "type": "minecraft:crafting_shapeless",
+  "ingredients": [
+    { "item": "minecraft:feather" },
+    { "item": "minecraft:leather" },
+    { "item": "minecraft:iron_ingot" },
+    { "item": "minecraft:redstone" }
+  ],
+  "result": { "item": "edgerunner:parkour_band" }
+}

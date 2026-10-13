@@ -1,6 +1,5 @@
-# Edge Runner (Forge 1.16.5)
-Controls (default keys):
-- Sprint forward -> momentum builds up (speed + FOV)
-- Jump near a wall while sprinting -> wall run, jump again -> wall jump
-- Shift while sprinting on the ground -> slide (Jump during slide = slide-jump)
-- Hold Forward + Jump toward a ledge up to 3 blocks high -> vault
+# Edge Runner 1.1.0 (Forge 1.16.5)
+- Parkour mode toggle: right click with the Parkour Band, or press G.
+- Craft: feather + leather + iron ingot + redstone (shapeless).
+- Sprint -> momentum; jump at a wall -> wall run; jump again -> wall jump;
+  Shift while sprinting -> slide; hold W + Jump at a ledge (<=3 blocks) -> vault.
