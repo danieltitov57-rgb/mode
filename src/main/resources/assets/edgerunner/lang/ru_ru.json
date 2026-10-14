@@ -1,5 +1,7 @@
 {
+  "itemGroup.edgerunner": "Edge Runner",
   "item.edgerunner.parkour_band": "Паркур-браслет",
+  "item.edgerunner.katana": "Катана",
   "key.edgerunner.toggle": "Переключить паркур-режим",
   "key.edgerunner.help": "Показать / скрыть подсказки",
   "key.categories.edgerunner": "Edge Runner"

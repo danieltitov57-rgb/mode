@@ -8,6 +8,8 @@ import net.minecraft.client.Minecraft;
 import net.minecraft.client.entity.player.ClientPlayerEntity;
 import net.minecraft.client.renderer.IRenderTypeBuffer;
 import net.minecraft.client.renderer.entity.PlayerRenderer;
+import net.minecraft.client.renderer.model.ItemCameraTransforms;
+import net.minecraft.client.renderer.texture.OverlayTexture;
 import net.minecraft.client.settings.KeyBinding;
 import net.minecraft.entity.Pose;
 import net.minecraft.entity.ai.attributes.AttributeModifier;
@@ -40,7 +42,7 @@ import java.util.UUID;
 @Mod.EventBusSubscriber(modid = EdgeRunner.MODID, value = Dist.CLIENT)
 public class ParkourClient {
 
-    private enum State { NONE, WALLRUN, SLIDE, VAULT }
+    private enum State { NONE, WALLRUN, SLIDE, VAULT, HANG, CLIMB }
 
     /** Toggle parkour mode (default G). */
     public static final KeyBinding TOGGLE_KEY =
@@ -83,11 +85,17 @@ public class ParkourClient {
     private static double slideSpeed;
     private static boolean slideLow;
 
-    // vault
+    // vault / pull-up
     private static Vector3d vaultDir = Vector3d.ZERO;
     private static double vaultTop;
+    private static double vaultSpeed;
+    private static int vaultFwdMax;
     private static boolean vaultRising;
     private static int vaultForwardTicks;
+
+    // ledge hang / wall climb
+    private static Direction climbDir = Direction.NORTH;
+    private static double hangTop;
 
     // animation values (previous / current) for smooth interpolation
     private static float tilt, prevTilt;
@@ -99,9 +107,17 @@ public class ParkourClient {
     private static float landAmt, prevLand;
     private static float fallAmt, prevFall;
     private static float balAmt, prevBal;
+    private static float hangAmt, prevHang;
+    private static float climbAmt, prevClimb;
+    private static float climbPhase, prevClimbPhase;
+    private static float gaitAmt, prevGaitAmt;
+    private static float gaitPhase, prevGaitPhase;
+    private static float lean, prevLean;
+    private static float swayYaw, prevSwayYaw;
+    private static float swayPitch, prevSwayPitch;
     private static float fallTarget;
 
-    // first-person hand transform bookkeeping (so we can undo it between the two hand events)
+    // first-person transform bookkeeping (so we can undo it between the two hand events)
     private static final List<double[]> applied = new ArrayList<>();
 
     // ------------------------------------------------------------ public info
@@ -109,12 +125,15 @@ public class ParkourClient {
     public static boolean isEnabled() { return enabled; }
     public static boolean isHelpVisible() { return helpVisible; }
     public static double getMomentum() { return momentum; }
+    public static boolean isBusy() { return state != State.NONE; }
 
     public static String getStateLabel() {
         switch (state) {
             case WALLRUN: return "БЕГ ПО СТЕНЕ";
             case SLIDE:   return "ПОДКАТ";
             case VAULT:   return "ВСКАКИВАНИЕ";
+            case HANG:    return "ЗАЦЕП";
+            case CLIMB:   return "ЛАЗАНИЕ";
             default:
                 if (balancing) return "БАЛАНС";
                 if (momentum > 0.05D) return "РАЗГОН";
@@ -171,16 +190,27 @@ public class ParkourClient {
         float roll = lerp(pt, prevTilt, tilt);
         float slide = lerp(pt, prevSlide, slideAmt);
         float vault = lerp(pt, prevVault, vaultAmt);
-        float mom = lerp(pt, prevMom, momAmt);
         float land = lerp(pt, prevLand, landAmt);
         float kk = lerp(pt, prevKick, kick);
         float bal = lerp(pt, prevBal, balAmt);
+        float gait = lerp(pt, prevGaitAmt, gaitAmt);
+        float gp = lerp(pt, prevGaitPhase, gaitPhase);
+        float ln = lerp(pt, prevLean, lean);
+        float cl = lerp(pt, prevClimb, climbAmt);
+        float cp = lerp(pt, prevClimbPhase, climbPhase);
         float t = clientTicks + pt;
 
-        roll += (float) Math.sin(t * 0.5F) * 0.5F * mom;   // head sway while running fast
+        roll += ln;                                        // lean into strafing
+        roll += (float) Math.sin(gp) * 0.8F * gait;        // head sway of the stride
         roll += (float) Math.sin(t * 0.12F) * 1.5F * bal;  // balancing sway
+        roll += (float) Math.sin(cp) * 1.2F * cl;          // climbing sway
+        roll += KatanaClient.camRoll(pt);
         e.setRoll(e.getRoll() + roll);
-        e.setPitch(e.getPitch() + slide * 2.5F + vault * 5.0F + land * 4.0F - kk * 1.5F);
+
+        float pitch = slide * 2.5F + vault * 5.0F + land * 4.0F - kk * 1.5F;
+        pitch += (float) Math.sin(gp * 2.0F) * 0.25F * gait;
+        pitch += KatanaClient.camPitch(pt);
+        e.setPitch(e.getPitch() + pitch);
     }
 
     /**
@@ -201,8 +231,15 @@ public class ParkourClient {
 
         animateHand(ms, pt, s);
 
+        boolean katana = pl != null && pl.getMainHandItem().getItem() instanceof KatanaItem;
+        if (main && katana) {
+            e.setCanceled(true);
+            renderKatana(ms, pt, s, pl);
+            return;
+        }
+
         // empty off-hand: vanilla draws no arm, so draw one ourselves while parkouring
-        if (!main && pl != null && armsVisible() && !pl.isInvisible()
+        if (!main && pl != null && !katana && armsVisible() && !pl.isInvisible()
                 && pl.getItemInHand(Hand.OFF_HAND).isEmpty()) {
             renderExtraArm(ms, pt, s, pl);
         }
@@ -237,11 +274,16 @@ public class ParkourClient {
     }
 
     private static boolean armsVisible() {
-        return enabled && (momAmt > 0.05F || slideAmt > 0.02F || Math.abs(wallAmt) > 0.02F
-                || Math.abs(vaultAmt) > 0.02F || balAmt > 0.02F || kick > 0.05F
-                || landAmt > 0.05F || fallAmt > 0.05F);
+        return enabled && (gaitAmt > 0.15F || momAmt > 0.05F || slideAmt > 0.02F || Math.abs(wallAmt) > 0.02F
+                || Math.abs(vaultAmt) > 0.02F || balAmt > 0.02F || kick > 0.05F || landAmt > 0.05F
+                || fallAmt > 0.05F || hangAmt > 0.02F || climbAmt > 0.02F);
     }
 
+    /*
+     * Axis cheat-sheet (view space, hand on the right side, camera looks along -Z):
+     *   rot X  +  lifts the far end of the arm UP,   -  points it DOWN
+     *   rot Z  +s swings the hand OUTWARD and up (s = +1 right hand, -1 left hand)
+     */
     private static void animateHand(MatrixStack ms, float pt, float s) {
         float slide = lerp(pt, prevSlide, slideAmt);
         float vault = lerp(pt, prevVault, vaultAmt);
@@ -251,13 +293,27 @@ public class ParkourClient {
         float land = lerp(pt, prevLand, landAmt);
         float fall = lerp(pt, prevFall, fallAmt);
         float bal = lerp(pt, prevBal, balAmt);
+        float hang = lerp(pt, prevHang, hangAmt);
+        float climb = lerp(pt, prevClimb, climbAmt);
+        float cph = lerp(pt, prevClimbPhase, climbPhase) + (s > 0 ? 0.0F : (float) Math.PI);
+        float gait = lerp(pt, prevGaitAmt, gaitAmt);
+        float gph = lerp(pt, prevGaitPhase, gaitPhase) + (s > 0 ? 0.0F : (float) Math.PI);
+        float sy = lerp(pt, prevSwayYaw, swayYaw);
+        float sp = lerp(pt, prevSwayPitch, swayPitch);
         float t = clientTicks + pt;
 
-        // running: arms pump in opposite phase
-        if (mom > 0.001F) {
-            float phase = t * 0.6F + (s > 0 ? 0.0F : (float) Math.PI);
-            tr(ms, 0.0D, Math.sin(phase) * 0.04D * mom - 0.03D * mom, Math.cos(phase) * 0.06D * mom);
-            rot(ms, 0, (float) Math.sin(phase) * 8.0F * mom);
+        // locomotion: hands lag behind the camera (inertia)
+        tr(ms, -sy * 0.004D, sp * 0.004D, 0.0D);
+        rot(ms, 2, -sy * 0.25F);
+        rot(ms, 0, sp * 0.2F);
+
+        // locomotion: stride - arms swing at the sides, out and back, opposite phase
+        if (gait > 0.001F) {
+            tr(ms, s * (0.07D + 0.03D * Math.sin(gph * 0.5F + 1.0F)) * gait,
+                    Math.sin(gph) * 0.035D * gait - 0.02D * gait - 0.02D * mom,
+                    Math.cos(gph) * 0.07D * gait);
+            rot(ms, 0, (float) Math.sin(gph) * 9.0F * gait);
+            rot(ms, 2, s * (6.0F + 5.0F * (float) Math.sin(gph + 1.2F)) * gait);
         }
 
         // balancing on a fence: arms spread wide and wobble
@@ -266,45 +322,59 @@ public class ParkourClient {
             rot(ms, 2, s * 38.0F * bal + (float) Math.sin(t * 0.17F + s) * 4.0F * bal);
         }
 
-        // wall run: the hand next to the wall reaches out and scrapes it, the far hand tucks in
+        // wall run: hand on the wall side is pressed against it, the other hangs down
         float aw = Math.abs(wa);
         if (aw > 0.001F) {
             if (Math.signum(wa) == s) {
-                tr(ms, s * 0.22D * aw, 0.08D * aw + Math.sin(t * 1.8F) * 0.01D * aw, -0.05D * aw);
-                rot(ms, 2, s * 30.0F * aw);
+                tr(ms, s * 0.30D * aw, 0.15D * aw + Math.sin(t * 1.8F) * 0.01D * aw, -0.10D * aw);
+                rot(ms, 2, s * 38.0F * aw);
             } else {
-                tr(ms, -s * 0.06D * aw, -0.10D * aw, 0.0D);
-                rot(ms, 2, -s * 8.0F * aw);
+                tr(ms, -s * 0.05D * aw, -0.32D * aw, 0.05D * aw);
+                rot(ms, 0, -40.0F * aw);
+                rot(ms, 2, -s * 10.0F * aw);
             }
         }
 
-        // slide: hands pushed down and out, bracing
+        // slide: hands low and braced
         if (slide > 0.001F) {
             tr(ms, s * 0.10D * slide, -0.18D * slide + Math.sin(t * 2.2F) * 0.004D * slide, 0.10D * slide);
-            rot(ms, 0, 25.0F * slide);
+            rot(ms, 0, -20.0F * slide);
             rot(ms, 2, s * 14.0F * slide);
         }
 
-        // vault: reach up and forward, then push off the ledge
+        // vault / pull-up: reach up and forward, then push off the ledge
         if (vault > 0.001F) {
-            rot(ms, 0, -45.0F * vault);
             tr(ms, s * 0.04D * vault, 0.18D * vault, -0.20D * vault);
+            rot(ms, 0, 40.0F * vault);
         } else if (vault < -0.001F) {
             float k = -vault;
-            rot(ms, 0, 22.0F * k);
             tr(ms, 0.0D, -0.15D * k, 0.03D * k);
+            rot(ms, 0, -20.0F * k);
+        }
+
+        // ledge hang: both arms straight up, gripping
+        if (hang > 0.001F) {
+            tr(ms, s * 0.06D * hang, 0.30D * hang, -0.10D * hang);
+            rot(ms, 0, 70.0F * hang);
+        }
+
+        // wall climb: hands reach up alternately
+        if (climb > 0.001F) {
+            float reach = (float) Math.sin(cph);
+            tr(ms, s * 0.06D * climb, (0.22D + 0.12D * reach) * climb, -0.08D * climb);
+            rot(ms, 0, (55.0F + 12.0F * reach) * climb);
         }
 
         // jump / wall jump thrust
         if (kk > 0.001F) {
             tr(ms, 0.0D, 0.10D * kk, -0.20D * kk);
-            rot(ms, 0, -18.0F * kk);
+            rot(ms, 0, 18.0F * kk);
         }
 
         // landing impact
         if (land > 0.001F) {
             tr(ms, 0.0D, -0.30D * land, 0.06D * land);
-            rot(ms, 0, 16.0F * land);
+            rot(ms, 0, -16.0F * land);
         }
 
         // falling fast: hands lift and shake in the wind
@@ -336,6 +406,27 @@ public class ParkourClient {
         ms.popPose();
     }
 
+    /** Draws the held katana with our own animation instead of the vanilla swing. */
+    private static void renderKatana(MatrixStack ms, float pt, float s, ClientPlayerEntity pl) {
+        Minecraft mc = Minecraft.getInstance();
+        float[] k = KatanaClient.pose(pt);
+        float draw = KatanaClient.draw(pt);
+
+        tr(ms, s * 0.56D, -0.52D - 0.6D * draw, -0.72D);
+        tr(ms, k[0] * s, k[1], k[2]);
+        rot(ms, 1, k[4] * s);
+        rot(ms, 0, k[3]);
+        rot(ms, 2, k[5] * s);
+
+        ItemCameraTransforms.TransformType type = s > 0
+                ? ItemCameraTransforms.TransformType.FIRST_PERSON_RIGHT_HAND
+                : ItemCameraTransforms.TransformType.FIRST_PERSON_LEFT_HAND;
+        IRenderTypeBuffer buffer = mc.renderBuffers().bufferSource();
+        int light = mc.getEntityRenderDispatcher().getPackedLightCoords(pl, pt);
+        mc.getItemRenderer().renderStatic(pl, pl.getMainHandItem(), type, s < 0, ms, buffer, pl.level, light,
+                OverlayTexture.NO_OVERLAY);
+    }
+
     // ------------------------------------------------------------------- logic
 
     private static void capturePrev() {
@@ -348,6 +439,14 @@ public class ParkourClient {
         prevLand = landAmt;
         prevFall = fallAmt;
         prevBal = balAmt;
+        prevHang = hangAmt;
+        prevClimb = climbAmt;
+        prevClimbPhase = climbPhase;
+        prevGaitAmt = gaitAmt;
+        prevGaitPhase = gaitPhase;
+        prevLean = lean;
+        prevSwayYaw = swayYaw;
+        prevSwayPitch = swayPitch;
     }
 
     private static void tick(ClientPlayerEntity p) {
@@ -420,34 +519,62 @@ public class ParkourClient {
             }
 
             if (state == State.NONE && !balancing) {
-                Vector3d look = horizontalLook(p);
-                if (look != null && fwd && jump && cooldown == 0) {
-                    double top = findLedge(p, look);
-                    if (!Double.isNaN(top)) startVault(look, top);
-                }
-                // slide: ONE press of Shift while running; holding or releasing does not matter
-                if (state == State.NONE && ground && shiftEdge && (p.isSprinting() || hs > 0.13D)) {
-                    startSlide(p, m, hs);
-                }
-                if (state == State.NONE && !ground && airTicks >= 2 && fwd && hs > 0.2D
-                        && wallRunBudget > 0 && cooldown == 0) {
-                    tryStartWallRun(m, hs);
-                }
+                startMoves(p, m, hs, ground, fwd, jump, shiftEdge);
             }
 
             switch (state) {
                 case WALLRUN: doWallRun(p, fwd, jumpEdge); break;
                 case SLIDE:   doSlide(p, jumpEdge); break;
                 case VAULT:   doVault(p); break;
+                case HANG:    doHang(p, o, fwd, jump, shift); break;
+                case CLIMB:   doClimb(p, o, fwd, jump, shift, jumpEdge); break;
                 default: break;
             }
         }
 
+        updateLocomotion(p, m, hs, ground, disabled);
         applyModifiers(p);
         updateAnim();
 
         wasGround = ground;
         lastVy = m.y;
+    }
+
+    /** Decides which parkour move (if any) starts this tick. */
+    private static void startMoves(ClientPlayerEntity p, Vector3d m, double hs, boolean ground,
+                                   boolean fwd, boolean jump, boolean shiftEdge) {
+        Vector3d look = horizontalLook(p);
+        if (look != null && cooldown == 0 && fwd) {
+            Direction fd = Direction.getNearest((float) look.x, 0.0F, (float) look.z);
+            Vector3d fv = new Vector3d(fd.getStepX(), 0.0D, fd.getStepZ());
+            boolean facing = look.x * fv.x + look.z * fv.z > 0.7D;
+            if (facing) {
+                double top = findLedge(p.level, p.getX(), p.getY(), p.getZ(), fv, 2.6D);
+                double rise = top - p.getY();
+                if (ground) {
+                    if (jump) {
+                        if (!Double.isNaN(top)) startVault(fv, top, 0.5D, 3);
+                        else if (wallAhead(p, fv, true)) startClimb(fd);
+                    }
+                } else if (airTicks >= 1) {
+                    if (!Double.isNaN(top) && rise >= 1.4D && rise <= 2.35D && m.y <= 0.3D
+                            && hasSupport(p.level, p.getX(), p.getZ(), top, fv)) {
+                        startHang(fd, top);                       // jumped at a ledge: grab it
+                    } else if (jump) {
+                        if (!Double.isNaN(top) && rise < 1.4D) startVault(fv, top, 0.5D, 3);
+                        else if (wallAhead(p, fv, true)) startClimb(fd);
+                    }
+                }
+            }
+        }
+        // slide: ONE press of Shift while running; holding or releasing does not matter
+        if (state == State.NONE && ground && shiftEdge && (p.isSprinting() || hs > 0.13D)) {
+            startSlide(p, m, hs);
+        }
+        if (state == State.NONE && !ground && airTicks >= 2 && fwd && hs > 0.2D
+                && wallRunBudget > 0 && cooldown == 0) {
+            tryStartWallRun(m, hs);
+        }
     }
 
     private static void updateMomentum(ClientPlayerEntity p, boolean fwd, boolean ground) {
@@ -465,6 +592,34 @@ public class ParkourClient {
         if (p.horizontalCollision && state == State.NONE) {
             momentum = Math.max(0.0D, momentum - 0.1D);
         }
+    }
+
+    /** Procedural locomotion layer: stride phase, strafe lean and camera-inertia sway. */
+    private static void updateLocomotion(ClientPlayerEntity p, Vector3d m, double hs, boolean ground,
+                                         boolean disabled) {
+        boolean active = enabled && !disabled;
+
+        float gaitT = 0.0F;
+        if (active && state == State.NONE && ground) {
+            gaitT = (float) MathHelper.clamp(hs / 0.15D, 0.0D, 1.2D);
+            if (balancing) gaitT *= 0.5F;
+        } else if (active && state == State.NONE) {
+            gaitT = 0.2F;
+        }
+        gaitAmt += (gaitT - gaitAmt) * 0.2F;
+        gaitPhase += 0.28F * gaitAmt + 0.25F * (float) momentum;
+
+        double yaw = Math.toRadians(p.yRot);
+        double lat = m.x * -Math.cos(yaw) + m.z * -Math.sin(yaw); // right-hand component
+        float leanT = active ? (float) MathHelper.clamp(lat * 25.0D, -4.0D, 4.0D) : 0.0F;
+        lean += (leanT - lean) * 0.25F;
+
+        float dyaw = MathHelper.wrapDegrees(p.yRot - p.yRotO);
+        float dpit = p.xRot - p.xRotO;
+        float syT = active ? MathHelper.clamp(dyaw, -25.0F, 25.0F) : 0.0F;
+        float spT = active ? MathHelper.clamp(dpit, -20.0F, 20.0F) : 0.0F;
+        swayYaw += (syT - swayYaw) * 0.35F;
+        swayPitch += (spT - swayPitch) * 0.35F;
     }
 
     /** Standing on top of a fence / wall (their collision box is 1.5 high). */
@@ -558,6 +713,13 @@ public class ParkourClient {
         return !w.getBlockState(pos).getCollisionShape(w, pos).isEmpty();
     }
 
+    /** A wall right in front of the player (both body heights, or either one if requireBoth is false). */
+    private static boolean wallAhead(ClientPlayerEntity p, Vector3d dir, boolean requireBoth) {
+        boolean low = solidAt(p, dir.x * 0.55D, dir.z * 0.55D, 0.3D);
+        boolean high = solidAt(p, dir.x * 0.55D, dir.z * 0.55D, 1.2D);
+        return requireBoth ? (low && high) : (low || high);
+    }
+
     // ------------------------------------------------------------------ slide
 
     private static void startSlide(ClientPlayerEntity p, Vector3d m, double hs) {
@@ -604,40 +766,164 @@ public class ParkourClient {
         return true;
     }
 
-    // ------------------------------------------------------------------ vault
+    // ------------------------------------------------- vault / pull-up (shared)
 
-    private static void startVault(Vector3d dir, double top) {
+    private static void startVault(Vector3d dir, double top, double speed, int fwdTicks) {
         vaultDir = dir;
         vaultTop = top;
+        vaultSpeed = speed;
+        vaultFwdMax = fwdTicks;
         vaultRising = true;
         vaultForwardTicks = 0;
         state = State.VAULT;
         stateTicks = 0;
-        kick = Math.max(kick, 0.6F);
+        kick = Math.max(kick, speed > 0.4D ? 0.6F : 0.2F);
     }
 
     private static void doVault(ClientPlayerEntity p) {
         stateTicks++;
         p.fallDistance = 0.0F;
-        if (stateTicks > 18) {
+        if (stateTicks > 30) {
             endState();
             cooldown = 8;
             return;
         }
         if (vaultRising && p.getY() >= vaultTop) vaultRising = false;
 
+        double fwdSpeed = vaultSpeed > 0.4D ? 0.3D : 0.22D;
         if (vaultRising) {
-            double vy = Math.min(0.5D, vaultTop + 0.05D - p.getY());
+            double vy = Math.min(vaultSpeed, vaultTop + 0.05D - p.getY());
             p.setDeltaMovement(vaultDir.x * 0.1D, vy, vaultDir.z * 0.1D);
         } else {
             vaultForwardTicks++;
-            p.setDeltaMovement(vaultDir.x * 0.3D, 0.0D, vaultDir.z * 0.3D);
-            if (vaultForwardTicks >= 3) {
+            p.setDeltaMovement(vaultDir.x * fwdSpeed, 0.0D, vaultDir.z * fwdSpeed);
+            if (vaultForwardTicks >= vaultFwdMax) {
                 endState();
                 cooldown = 8;
             }
         }
     }
+
+    // ------------------------------------------------------------- ledge hang
+
+    private static void startHang(Direction d, double top) {
+        climbDir = d;
+        hangTop = top;
+        state = State.HANG;
+        stateTicks = 0;
+        kick = Math.max(kick, 0.4F);
+    }
+
+    private static void startPullUp(Direction d, double top) {
+        startVault(new Vector3d(d.getStepX(), 0.0D, d.getStepZ()), top, 0.28D, 4);
+    }
+
+    private static void doHang(ClientPlayerEntity p, GameSettings o, boolean fwd, boolean jump, boolean shift) {
+        stateTicks++;
+        p.fallDistance = 0.0F;
+        Vector3d n = new Vector3d(climbDir.getStepX(), 0.0D, climbDir.getStepZ());
+
+        double top = findLedge(p.level, p.getX(), p.getY(), p.getZ(), n, 2.6D);
+        if (Double.isNaN(top) || stateTicks > 600) {
+            endState();
+            cooldown = 6;
+            return;
+        }
+        hangTop = top;
+
+        if (shift || o.keyDown.isDown()) {          // let go
+            endState();
+            cooldown = 12;
+            return;
+        }
+        if (stateTicks >= 6 && (fwd || jump)) {     // pull up
+            startPullUp(climbDir, top);
+            return;
+        }
+
+        // shimmy sideways along the ledge
+        double rx = -climbDir.getStepZ();
+        double rz = climbDir.getStepX();
+        int lat = (o.keyRight.isDown() ? 1 : 0) - (o.keyLeft.isDown() ? 1 : 0);
+        if (lat != 0 && Double.isNaN(findLedge(p.level, p.getX() + rx * lat * 0.4D, p.getY(),
+                p.getZ() + rz * lat * 0.4D, n, 2.6D))) {
+            lat = 0;
+        }
+        if (lat != 0) climbPhase += 0.3F;
+
+        Vector3d st = faceVelocity(p, climbDir, top - 0.1D);
+        double vy = MathHelper.clamp((top - 2.1D - p.getY()) * 0.5D, -0.3D, 0.3D);
+        p.setDeltaMovement(st.x + rx * lat * 0.06D, vy, st.z + rz * lat * 0.06D);
+    }
+
+    // ------------------------------------------------------------- wall climb
+
+    private static void startClimb(Direction d) {
+        climbDir = d;
+        state = State.CLIMB;
+        stateTicks = 0;
+        climbPhase = 0.0F;
+    }
+
+    private static void doClimb(ClientPlayerEntity p, GameSettings o, boolean fwd, boolean jump,
+                                boolean shift, boolean jumpEdge) {
+        stateTicks++;
+        p.fallDistance = 0.0F;
+        Vector3d n = new Vector3d(climbDir.getStepX(), 0.0D, climbDir.getStepZ());
+
+        if (!wallAhead(p, n, false) || stateTicks > 1200 || (!fwd && !jump && !shift)) {
+            endState();
+            cooldown = 6;
+            return;
+        }
+        // S + Space: push off the wall backwards
+        if (o.keyDown.isDown() && jumpEdge) {
+            p.setDeltaMovement(-n.x * 0.42D, 0.5D, -n.z * 0.42D);
+            endState();
+            cooldown = 12;
+            kick = 1.0F;
+            return;
+        }
+        // reached the top: pull over the ledge
+        if (jump) {
+            double top = findLedge(p.level, p.getX(), p.getY(), p.getZ(), n, 2.3D);
+            if (!Double.isNaN(top) && top - p.getY() >= 0.9D) {
+                startPullUp(climbDir, top);
+                return;
+            }
+        }
+
+        double vy = jump ? 0.13D : (shift ? -0.12D : 0.0D);
+        if (vy < 0.0D && p.isOnGround()) {
+            endState();
+            cooldown = 6;
+            return;
+        }
+
+        double rx = -climbDir.getStepZ();
+        double rz = climbDir.getStepX();
+        int lat = (o.keyRight.isDown() ? 1 : 0) - (o.keyLeft.isDown() ? 1 : 0);
+        if (lat != 0 && !solidAt(p, n.x * 0.55D + rx * lat * 0.4D, n.z * 0.55D + rz * lat * 0.4D, 0.8D)) {
+            lat = 0;
+        }
+        if (vy != 0.0D || lat != 0) climbPhase += 0.45F;
+
+        Vector3d st = faceVelocity(p, climbDir, p.getY() + 0.8D);
+        p.setDeltaMovement(st.x + rx * lat * 0.07D, vy, st.z + rz * lat * 0.07D);
+    }
+
+    /** Small velocity that keeps the player 0.35 blocks away from the wall face in front of them. */
+    private static Vector3d faceVelocity(ClientPlayerEntity p, Direction d, double probeY) {
+        BlockPos bp = new BlockPos(p.getX() + d.getStepX() * 0.7D, probeY, p.getZ() + d.getStepZ() * 0.7D);
+        if (d.getAxis() == Direction.Axis.X) {
+            double target = d.getStepX() > 0 ? bp.getX() - 0.35D : bp.getX() + 1.35D;
+            return new Vector3d(MathHelper.clamp((target - p.getX()) * 0.5D, -0.15D, 0.15D), 0.0D, 0.0D);
+        }
+        double target = d.getStepZ() > 0 ? bp.getZ() - 0.35D : bp.getZ() + 1.35D;
+        return new Vector3d(0.0D, 0.0D, MathHelper.clamp((target - p.getZ()) * 0.5D, -0.15D, 0.15D));
+    }
+
+    // ---------------------------------------------------------------- ledges
 
     private static Vector3d horizontalLook(ClientPlayerEntity p) {
         Vector3d look = p.getLookAngle();
@@ -646,14 +932,17 @@ public class ParkourClient {
         return new Vector3d(look.x / l, 0.0D, look.z / l);
     }
 
-    /** Returns the Y of the top of a ledge that can be vaulted onto, or NaN. */
-    private static double findLedge(ClientPlayerEntity p, Vector3d dir) {
-        World w = p.level;
-        double x = p.getX() + dir.x * 0.7D;
-        double z = p.getZ() + dir.z * 0.7D;
-        int baseY = MathHelper.floor(p.getY() + 0.001D);
+    /**
+     * Top Y of the first ledge ahead (a solid block with 2 free blocks above it) whose top is
+     * between 0.6 and maxRise above py, or NaN. Tall walls are scanned upwards block by block.
+     */
+    private static double findLedge(World w, double px, double py, double pz, Vector3d dir, double maxRise) {
+        double x = px + dir.x * 0.7D;
+        double z = pz + dir.z * 0.7D;
+        int baseY = MathHelper.floor(py + 0.001D);
+        int maxK = (int) Math.ceil(maxRise) + 1;
 
-        for (int k = 0; k <= 2; k++) {
+        for (int k = 0; k <= maxK; k++) {
             BlockPos ledge = new BlockPos(x, baseY + k, z);
             BlockState bs = w.getBlockState(ledge);
             VoxelShape shape = bs.getCollisionShape(w, ledge);
@@ -661,15 +950,22 @@ public class ParkourClient {
 
             BlockPos a1 = ledge.above();
             BlockPos a2 = ledge.above(2);
-            if (!w.getBlockState(a1).getCollisionShape(w, a1).isEmpty()) return Double.NaN;
-            if (!w.getBlockState(a2).getCollisionShape(w, a2).isEmpty()) return Double.NaN;
+            if (!w.getBlockState(a1).getCollisionShape(w, a1).isEmpty()) continue;
+            if (!w.getBlockState(a2).getCollisionShape(w, a2).isEmpty()) continue;
 
             double top = ledge.getY() + shape.max(Direction.Axis.Y);
-            double rise = top - p.getY();
-            if (rise > 0.6D && rise <= 2.6D) return top;
-            return Double.NaN;
+            double rise = top - py;
+            if (rise > 0.6D && rise <= maxRise) return top;
+            if (rise > maxRise) return Double.NaN;
         }
         return Double.NaN;
+    }
+
+    /** There is solid wall under the ledge (so we are not grabbing a floating block). */
+    private static boolean hasSupport(World w, double px, double pz, double top, Vector3d dir) {
+        BlockPos ledge = new BlockPos(px + dir.x * 0.7D, top - 0.1D, pz + dir.z * 0.7D);
+        BlockPos below = ledge.below();
+        return !w.getBlockState(below).getCollisionShape(w, below).isEmpty();
     }
 
     // ---------------------------------------------------------------- helpers
@@ -717,12 +1013,16 @@ public class ParkourClient {
         float vaultT = state == State.VAULT ? (vaultRising ? 1.0F : -0.6F) : 0.0F;
         float wallT = state == State.WALLRUN ? wallSide : 0.0F;
         float balT = balancing ? 1.0F : 0.0F;
+        float hangT = state == State.HANG ? 1.0F : 0.0F;
+        float climbT = state == State.CLIMB ? 1.0F : 0.0F;
 
         tilt += (tiltT - tilt) * 0.3F;
         slideAmt += (slideT - slideAmt) * 0.35F;
         vaultAmt += (vaultT - vaultAmt) * 0.4F;
         wallAmt += (wallT - wallAmt) * 0.3F;
         balAmt += (balT - balAmt) * 0.25F;
+        hangAmt += (hangT - hangAmt) * 0.35F;
+        climbAmt += (climbT - climbAmt) * 0.35F;
         momAmt += ((float) momentum - momAmt) * 0.2F;
         fallAmt += (fallTarget - fallAmt) * 0.25F;
         kick *= 0.75F;

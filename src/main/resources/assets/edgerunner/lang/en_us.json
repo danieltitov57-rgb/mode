@@ -1,5 +1,7 @@
 {
+  "itemGroup.edgerunner": "Edge Runner",
   "item.edgerunner.parkour_band": "Parkour Band",
+  "item.edgerunner.katana": "Katana",
   "key.edgerunner.toggle": "Toggle parkour mode",
   "key.edgerunner.help": "Show / hide parkour help",
   "key.categories.edgerunner": "Edge Runner"

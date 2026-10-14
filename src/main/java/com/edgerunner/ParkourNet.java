@@ -4,7 +4,6 @@ import net.minecraft.util.ResourceLocation;
 import net.minecraftforge.fml.network.NetworkRegistry;
 import net.minecraftforge.fml.network.simple.SimpleChannel;
 
-/** One tiny packet: the client tells the server "I am sliding" so the server lets the hitbox be low. */
 public class ParkourNet {
     private static final String PROTOCOL = "1";
 
@@ -16,5 +15,7 @@ public class ParkourNet {
 
     public static void register() {
         CHANNEL.registerMessage(0, SlidePacket.class, SlidePacket::encode, SlidePacket::decode, SlidePacket::handle);
+        CHANNEL.registerMessage(1, HeavyAttackPacket.class, HeavyAttackPacket::encode, HeavyAttackPacket::decode,
+                HeavyAttackPacket::handle);
     }
 }

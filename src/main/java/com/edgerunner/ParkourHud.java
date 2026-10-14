@@ -14,17 +14,17 @@ import net.minecraftforge.client.event.RenderGameOverlayEvent;
 import net.minecraftforge.eventbus.api.SubscribeEvent;
 import net.minecraftforge.fml.common.Mod;
 
-/** Hides the vanilla HUD in parkour mode and draws the controls helper + status strip. */
+/** Hides the vanilla HUD in parkour mode and draws a compact controls helper + status strip. */
 @Mod.EventBusSubscriber(modid = EdgeRunner.MODID, value = Dist.CLIENT)
 public class ParkourHud {
 
     private static final Style FONT = Style.EMPTY.withFont(new ResourceLocation(EdgeRunner.MODID, "ui"));
 
-    private static final int PANEL = 0xB00A0C10;
+    private static final int BG = 0x9E0B0D12;
     private static final int ACCENT = 0xFFE8392E;
-    private static final int TEXT = 0xFFF2F2F2;
-    private static final int DIM = 0xFF9AA0A6;
-    private static final int KEY_BG = 0xFF161A20;
+    private static final int TEXT = 0xFFEDEDED;
+    private static final int DIM = 0xFF8E949C;
+    private static final int KEY_LINE = 0xFF5A616B;
 
     private static ITextComponent t(String s) {
         return new StringTextComponent(s).withStyle(FONT);
@@ -72,21 +72,18 @@ public class ParkourHud {
     }
 
     private static void drawStatus(MatrixStack ms, FontRenderer font, int sw, int sh) {
-        String label = ParkourClient.getStateLabel();
-        ITextComponent c = t(label);
+        ITextComponent c = t(ParkourClient.getStateLabel());
         int w = font.width(c);
-        int barW = 140;
+        int barW = 90;
         int x = (sw - barW) / 2;
-        int y = sh - 22;
+        int y = sh - 18;
 
-        font.drawShadow(ms, c, (sw - w) / 2.0F, y - 13, TEXT);
+        font.drawShadow(ms, c, (sw - w) / 2.0F, y - 11, TEXT);
 
-        AbstractGui.fill(ms, x - 1, y - 1, x + barW + 1, y + 5, 0x99000000);
-        AbstractGui.fill(ms, x, y, x + barW, y + 4, 0xFF1B1F26);
+        AbstractGui.fill(ms, x, y, x + barW, y + 2, 0x80000000);
         int filled = (int) Math.round(barW * ParkourClient.getMomentum());
         if (filled > 0) {
-            AbstractGui.fill(ms, x, y, x + filled, y + 4, ACCENT);
-            AbstractGui.fill(ms, x, y, x + filled, y + 1, 0xFFFF8A80);
+            AbstractGui.fill(ms, x, y, x + filled, y + 2, ACCENT);
         }
     }
 
@@ -95,32 +92,32 @@ public class ParkourHud {
         String shift = key(mc.options.keyShift.getTranslatedKeyMessage().getString());
         String jump = key(mc.options.keyJump.getTranslatedKeyMessage().getString());
         String fwd = key(mc.options.keyUp.getTranslatedKeyMessage().getString());
+        String back = key(mc.options.keyDown.getTranslatedKeyMessage().getString());
+        String left = key(mc.options.keyLeft.getTranslatedKeyMessage().getString());
+        String right = key(mc.options.keyRight.getTranslatedKeyMessage().getString());
         String toggle = key(ParkourClient.TOGGLE_KEY.getTranslatedKeyMessage().getString());
         String help = key(ParkourClient.HELP_KEY.getTranslatedKeyMessage().getString());
 
-        String[][] keys = {
-                {sprint},
-                {shift},
-                {jump},
-                {jump},
-                {fwd, jump},
-                {}
-        };
-        String[] desc = {
-                "Бег: копит разгон",
-                "На бегу: подкат (хватит одного нажатия)",
-                "В прыжке у стены: бег по стене",
-                "На стене: прыжок от стены",
-                "У уступа до 3 блоков: вскакивание",
-                "Забор: баланс, медленный шаг"
-        };
+        boolean katana = mc.player.getMainHandItem().getItem() instanceof KatanaItem;
 
-        int rowH = 15;
-        int pad = 9;
-        int keyGap = 3;
-        int descGap = 7;
+        java.util.List<String[]> keys = new java.util.ArrayList<>();
+        java.util.List<String> desc = new java.util.ArrayList<>();
+        add(keys, desc, new String[] {sprint}, "Разгон");
+        add(keys, desc, new String[] {shift}, "Подкат");
+        add(keys, desc, new String[] {jump}, "У стены: бег / прыжок");
+        add(keys, desc, new String[] {fwd, jump}, "Вскок · лазание");
+        add(keys, desc, new String[] {left, right}, "По стене вбок");
+        add(keys, desc, new String[] {back, jump}, "Отскок от стены");
+        if (katana) {
+            add(keys, desc, new String[] {"ЛКМ"}, "Удар");
+            add(keys, desc, new String[] {"ПКМ"}, "Рывок");
+        }
 
-        // measure
+        float scale = 0.72F;
+        int rowH = 11;
+        int keyGap = 2;
+        int descGap = 5;
+
         int maxKeys = 0;
         for (String[] ks : keys) {
             int kw = 0;
@@ -131,32 +128,36 @@ public class ParkourHud {
         for (String d : desc) maxDesc = Math.max(maxDesc, font.width(t(d)));
 
         ITextComponent title = t("EDGE RUNNER");
-        ITextComponent footer = t(toggle + " режим   " + help + " подсказки");
-        int contentW = Math.max(maxKeys + descGap + maxDesc, Math.max(font.width(title), font.width(footer)));
-        int panelW = contentW + pad * 2 + 3;
-        int panelH = 22 + desc.length * rowH + 20;
+        ITextComponent hint = t(toggle + " · " + help);
+        int innerW = Math.max(maxKeys + descGap + maxDesc, font.width(title) + 10 + font.width(hint));
+        int panelW = innerW + 12;
+        int panelH = 18 + keys.size() * rowH + 3;
 
-        int x0 = 8;
-        int y0 = 8;
+        ms.pushPose();
+        ms.translate(6.0D, 6.0D, 0.0D);
+        ms.scale(scale, scale, 1.0F);
 
-        AbstractGui.fill(ms, x0, y0, x0 + panelW, y0 + panelH, PANEL);
-        AbstractGui.fill(ms, x0, y0, x0 + 2, y0 + panelH, ACCENT);
+        AbstractGui.fill(ms, 0, 0, panelW, panelH, BG);
+        AbstractGui.fill(ms, 0, 0, panelW, 1, ACCENT);
 
-        int tx = x0 + pad + 2;
-        font.drawShadow(ms, title, tx, y0 + 7, TEXT);
-        AbstractGui.fill(ms, tx, y0 + 19, tx + 24, y0 + 20, ACCENT);
+        font.drawShadow(ms, title, 6, 5, TEXT);
+        font.drawShadow(ms, hint, panelW - 6 - font.width(hint), 5, DIM);
 
-        int y = y0 + 26;
-        for (int i = 0; i < desc.length; i++) {
-            int kx = tx;
-            for (String k : keys[i]) {
+        int y = 17;
+        for (int i = 0; i < keys.size(); i++) {
+            int kx = 6;
+            for (String k : keys.get(i)) {
                 kx += drawKey(ms, font, kx, y, k) + keyGap;
             }
-            font.drawShadow(ms, t(desc[i]), tx + maxKeys + descGap, y + 2, i == 5 ? DIM : TEXT);
+            font.drawShadow(ms, t(desc.get(i)), 6 + maxKeys + descGap, y + 2, TEXT);
             y += rowH;
         }
+        ms.popPose();
+    }
 
-        font.drawShadow(ms, footer, tx, y + 3, DIM);
+    private static void add(java.util.List<String[]> keys, java.util.List<String> desc, String[] k, String d) {
+        keys.add(k);
+        desc.add(d);
     }
 
     private static String key(String s) {
@@ -164,15 +165,16 @@ public class ParkourHud {
     }
 
     private static int keyWidth(FontRenderer font, String label) {
-        return Math.max(14, font.width(t(label)) + 8);
+        return Math.max(11, font.width(t(label)) + 6);
     }
 
     private static int drawKey(MatrixStack ms, FontRenderer font, int x, int y, String label) {
         ITextComponent c = t(label);
         int w = keyWidth(font, label);
-        AbstractGui.fill(ms, x, y, x + w, y + 13, ACCENT);
-        AbstractGui.fill(ms, x + 1, y + 1, x + w - 1, y + 12, KEY_BG);
-        font.drawShadow(ms, c, x + (w - font.width(c)) / 2.0F, y + 3, TEXT);
+        // outlined keycap
+        AbstractGui.fill(ms, x, y, x + w, y + 10, KEY_LINE);
+        AbstractGui.fill(ms, x + 1, y + 1, x + w - 1, y + 9, 0xFF14171C);
+        font.drawShadow(ms, c, x + (w - font.width(c)) / 2.0F, y + 1, TEXT);
         return w;
     }
 }
